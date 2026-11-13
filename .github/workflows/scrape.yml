@@ -1,0 +1,78 @@
+name: Scrape prices
+
+# Each competitor's full catalogue is crawled in its own parallel job and written to the
+# Supabase database (secret DATABASE_URL). Nothing is committed to this repo: it only holds code.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # every day 03:00 UTC (06:00 Nairobi). Schedule the Power BI refresh after ~07:30.
+  workflow_dispatch:       # "Run workflow" button on the Actions tab
+  push:                    # editing config/ relabels products; uploading saved Carrefour pages imports them.
+    branches: [main]       # Neither visits any website.
+    paths: ["config/**", "manual/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrape-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false         # one site failing doesn't cancel the others
+      matrix:
+        scraper: [foodplus, naivas, quickmart]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Crawl ${{ matrix.scraper }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m pricewatch.run --only ${{ matrix.scraper }}
+
+  saved-pages-and-labels:
+    # runs daily too, and on every push to config/ or manual/
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Import saved Carrefour pages
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m pricewatch.run --only carrefour
+      - name: Re-apply config/product_map.csv labels
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m pricewatch.relabel
+
+  refresh:
+    # after the crawls (or a push): rebuild the stored day-by-day table that Power BI reads
+    needs: [crawl, saved-pages-and-labels]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Refresh v_daily_prices
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m pricewatch.refresh
