@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false         # one site failing doesn't cancel the others
       matrix:
-        scraper: [foodplus, naivas, quickmart]
+        scraper: [foodplus, naivas]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
