@@ -1,0 +1,5 @@
+competitor,sku,name_contains,category,product_group,key_item,notes
+,,kettle,Kettles,,no,any competitor: every name containing "kettle" goes in category Kettles
+,,ramtons 226,Kettles,Ramtons RM/226 kettle 1.7L,yes,"matches ""RAMTONS RM/226 CORDED KETTLE 1.7L"" and similar names at other sites"
+,,ramtons 324,Kettles,Ramtons RM/324 kettle 1.5L,yes,
+Foodplus,1132034000037,,Kettles,Ramtons RM/225 cordless kettle 1.7L,no,one exact item at one competitor (by SKU)

@@ -1,0 +1,334 @@
+// =====================================================================
+// DAX for Competitor Price Watch
+// 1. Create the Date table:  Modeling > New table > paste the "Date" block.
+// 2. Create a measures table: Home > Enter data > name it "Measures" > Load.
+// 3. Select "Measures", then Modeling > New measure, once per block below.
+//    Paste everything from "Name =" to the end of the block.
+// =====================================================================
+
+
+// ---------------------------- Date table -----------------------------
+// Modeling > New table. Afterwards: Table tools > Mark as date table > Date[Date]
+// Spans the whole history (first product seen -> today); DailyPrices only covers the last 35 days,
+// PriceChanges and Promotions go back to the start.
+Date =
+ADDCOLUMNS (
+    CALENDAR ( MIN ( Products[first_seen] ), MAX ( MAX ( DailyPrices[date] ), MAX ( Products[last_seen] ) ) ),
+    "Year", YEAR ( [Date] ),
+    "Month", FORMAT ( [Date], "mmm yyyy" ),
+    "Month Sort", YEAR ( [Date] ) * 100 + MONTH ( [Date] ),
+    "Week Start", [Date] - WEEKDAY ( [Date], 2 ) + 1,
+    "Weekday", FORMAT ( [Date], "ddd" ),
+    "Weekday No", WEEKDAY ( [Date], 2 ),
+    // 0 = the latest scraped day, 1 = the day before... (recalculated on every refresh)
+    "Days Ago", INT ( MAX ( DailyPrices[date] ) - [Date] ),
+    // matrix column header; set Sort by column = Days Ago so the newest day comes first
+    "Day Label", FORMAT ( [Date], "ddd dd MMM" )
+)
+
+
+// --------------------------- Latest prices ---------------------------
+// "Latest" = the last day in the current filter (date slicer, product, competitor).
+
+Latest Date =
+MAX ( DailyPrices[date] )
+
+Latest Normal Price =
+VAR d = [Latest Date]
+RETURN CALCULATE ( AVERAGE ( DailyPrices[normal_price] ), DailyPrices[date] = d )
+
+// Blank when no promo is running on the latest day
+Latest Promo Price =
+VAR d = [Latest Date]
+RETURN CALCULATE ( AVERAGE ( DailyPrices[promo_price] ), DailyPrices[date] = d )
+
+// What a customer pays today: promo if running, else normal
+Latest Price Paid =
+COALESCE ( [Latest Promo Price], [Latest Normal Price] )
+
+Promo Discount % =
+IF (
+    NOT ISBLANK ( [Latest Promo Price] ),
+    DIVIDE ( [Latest Normal Price] - [Latest Promo Price], [Latest Normal Price] )
+)
+
+// Normal price now vs the first day in the selected period
+Normal Price Change % (period) =
+VAR firstDay = MIN ( DailyPrices[date] )
+VAR firstPrice = CALCULATE ( AVERAGE ( DailyPrices[normal_price] ), DailyPrices[date] = firstDay )
+RETURN DIVIDE ( [Latest Normal Price] - firstPrice, firstPrice )
+
+
+// ----------------------- Change counts (alerts) -----------------------
+
+Normal Price Increases =
+CALCULATE ( COUNTROWS ( PriceChanges ), PriceChanges[change_type] = "increase" ) + 0
+
+Normal Price Drops =
+CALCULATE ( COUNTROWS ( PriceChanges ), PriceChanges[change_type] = "decrease" ) + 0
+
+Promos Started =
+CALCULATE ( COUNTROWS ( PriceChanges ), PriceChanges[change_type] = "promo_start" ) + 0
+
+Promos Ended =
+CALCULATE ( COUNTROWS ( PriceChanges ), PriceChanges[change_type] = "promo_end" ) + 0
+
+Promo Price Changes =
+CALCULATE ( COUNTROWS ( PriceChanges ), PriceChanges[change_type] = "promo_change" ) + 0
+
+All Price Changes =
+COUNTROWS ( PriceChanges ) + 0
+
+Products On Promo Now =
+VAR d = [Latest Date]
+RETURN
+    CALCULATE (
+        DISTINCTCOUNT ( DailyPrices[product_id] ),
+        DailyPrices[date] = d,
+        DailyPrices[on_promo] = 1
+    ) + 0
+
+Products Tracked =
+DISTINCTCOUNT ( Products[product_id] )
+
+
+// ------------------ Compare the same product across sites ------------------
+// Needs product_group filled in by the scrapers (same value at every competitor).
+
+// Cheapest price paid among all competitors selling this product_group
+// (ignores the search box and competitor slicer, so a single row still sees every competitor)
+Cheapest In Group =
+VAR grp = SELECTEDVALUE ( Products[product_group] )
+VAR ids =
+    CALCULATETABLE (
+        VALUES ( Products[product_id] ),
+        REMOVEFILTERS ( Products ),
+        Products[product_group] = grp
+    )
+RETURN
+    IF (
+        NOT ISBLANK ( grp ),
+        MINX (
+            ids,
+            VAR id = Products[product_id]
+            RETURN CALCULATE ( [Latest Price Paid], REMOVEFILTERS ( Products ), Products[product_id] = id )
+        )
+    )
+
+// How far above the cheapest competitor this listing is (0% = cheapest)
+Vs Cheapest % =
+DIVIDE ( [Latest Price Paid] - [Cheapest In Group], [Cheapest In Group] )
+
+
+// Name of the competitor with the lowest price paid for this product_group
+Cheapest Competitor =
+VAR grp = SELECTEDVALUE ( Products[product_group] )
+VAR byComp =
+    ADDCOLUMNS (
+        CALCULATETABLE ( VALUES ( Products[competitor] ), REMOVEFILTERS ( Products ), Products[product_group] = grp ),
+        "@price",
+            VAR c = Products[competitor]
+            RETURN CALCULATE ( [Latest Price Paid], REMOVEFILTERS ( Products ), Products[product_group] = grp, Products[competitor] = c )
+    )
+RETURN
+    IF ( NOT ISBLANK ( grp ), MAXX ( TOPN ( 1, FILTER ( byComp, NOT ISBLANK ( [@price] ) ), [@price], ASC ), Products[competitor] ) )
+
+
+// ------------- Long-range price evolution (full history, from PricePeriods) -------------
+// DailyPrices only holds the last 21 days. For trends over months, put these on a line chart
+// with X = Date[Date] (or Date[Week Start]). They work for any date since tracking began.
+// With several products in the filter they show the average across them, so pick one item
+// (or one product_group across competitors, with Legend = Products[competitor]).
+
+Normal Price On Date =
+VAR d = MAX ( 'Date'[Date] )
+RETURN
+    AVERAGEX (
+        VALUES ( Products[product_id] ),
+        CALCULATE ( MAX ( PricePeriods[normal_price] ), PricePeriods[valid_from] <= d, PricePeriods[valid_to] >= d )
+    )
+
+Promo Price On Date =
+VAR d = MAX ( 'Date'[Date] )
+RETURN
+    AVERAGEX (
+        VALUES ( Products[product_id] ),
+        CALCULATE ( MAX ( PricePeriods[promo_price] ), PricePeriods[valid_from] <= d, PricePeriods[valid_to] >= d )
+    )
+
+Price Paid On Date =
+VAR d = MAX ( 'Date'[Date] )
+RETURN
+    AVERAGEX (
+        VALUES ( Products[product_id] ),
+        CALCULATE ( MAX ( PricePeriods[effective_price] ), PricePeriods[valid_from] <= d, PricePeriods[valid_to] >= d )
+    )
+
+
+// ------------------- Chart markers (price evolution charts) -------------------
+// Put these on a line chart next to Latest Normal Price / Latest Promo Price, with
+// the line width set to 0 and markers on, so they show as dots only on the days it happened.
+
+Drop Marker =
+IF ( [Normal Price Drops] > 0, [Latest Normal Price] )
+
+Increase Marker =
+IF ( [Normal Price Increases] > 0, [Latest Normal Price] )
+
+Promo Start Marker =
+IF ( [Promos Started] > 0, [Latest Promo Price] )
+
+
+// ------------------ Daily price matrix (Category > Item > Retailer x Day) ------------------
+// See SETUP.md, page "Daily prices". Values only show on retailer rows, so category and item
+// rows act as headers instead of showing meaningless averages.
+
+Daily Price =
+IF ( ISINSCOPE ( Products[competitor] ), [Latest Price Paid] )
+
+// 1 = normal price went up that day, -1 = went down, 0 = no change (drives the ▲ ▼ icons)
+Daily Change Direction =
+IF (
+    ISINSCOPE ( Products[competitor] ),
+    SWITCH ( TRUE (), [Normal Price Increases] > 0, 1, [Normal Price Drops] > 0, -1, 0 )
+)
+
+// Cell background: purple on promo days, light purple on the day a promo started
+Daily Cell Colour =
+VAR onPromo = CALCULATE ( MAX ( DailyPrices[on_promo] ) )
+RETURN
+    IF (
+        ISINSCOPE ( Products[competitor] ) && ISINSCOPE ( 'Date'[Day Label] ),
+        SWITCH ( TRUE (),
+            [Promos Started] > 0, "#C9C1F2",
+            onPromo = 1, "#E6E1FA",
+            BLANK ()
+        )
+    )
+
+// Lowest price paid for this item among the retailers shown, on that day
+Cheapest Retailer Price Today =
+CALCULATE (
+    MINX ( VALUES ( Products[competitor] ), [Latest Price Paid] ),
+    ALLSELECTED ( Products[competitor] )   // respects the competitor slicer
+)
+
+// Font colour: bold green for the cheapest retailer that day
+Daily Font Colour =
+IF (
+    ISINSCOPE ( Products[competitor] ) && NOT ISBLANK ( [Latest Price Paid] )
+        && [Latest Price Paid] = [Cheapest Retailer Price Today],
+    "#006300"
+)
+
+// For the "changed only" filter: any increase, drop or promo start in the days shown
+Changes In View =
+[Normal Price Increases] + [Normal Price Drops] + [Promos Started]
+
+// Tooltip text for a cell, e.g. "Normal 18,999 · Promo 16,499 (−13%)"
+Daily Price Detail =
+VAR n = [Latest Normal Price]
+VAR p = [Latest Promo Price]
+RETURN
+    IF (
+        ISINSCOPE ( Products[competitor] ) && NOT ISBLANK ( n ),
+        "Normal " & FORMAT ( n, "#,0" )
+            & IF ( NOT ISBLANK ( p ), " · Promo " & FORMAT ( p, "#,0" ) & " (−" & FORMAT ( DIVIDE ( n - p, n ), "0%" ) & ")" )
+    )
+
+
+// ------------------------------ Promotions ------------------------------
+// Promotions table = one row per promo episode. The date slicer filters on start_date.
+
+Times On Promo =
+COUNTROWS ( Promotions ) + 0
+
+// Promos whose start we actually saw (excludes promos already running on the first day tracked)
+Promos Seen Starting =
+CALCULATE ( COUNTROWS ( Promotions ), Promotions[started_before_tracking] = "No" ) + 0
+
+Promo Days =
+SUM ( Promotions[days_on_promo] ) + 0
+
+// Only completed promos whose start was seen: real lengths, not "since tracking began"
+Avg Promo Length (days) =
+CALCULATE (
+    AVERAGE ( Promotions[days_on_promo] ),
+    Promotions[started_before_tracking] = "No",
+    Promotions[ongoing] = "No"
+)
+
+Avg Promo Discount % =
+AVERAGE ( Promotions[avg_discount_pct] ) / 100
+
+Deepest Discount % =
+MAX ( Promotions[max_discount_pct] ) / 100
+
+Last Promo Start =
+MAX ( Promotions[start_date] )
+
+Avg Days Between Promos =
+AVERAGE ( Promotions[days_since_previous_promo] )
+
+Promos Running Now =
+CALCULATE ( COUNTROWS ( Promotions ), Promotions[ongoing] = "Yes", REMOVEFILTERS ( 'Date' ) ) + 0
+
+// 0 while a promo is running; blank if never on promo
+Days Since Last Promo =
+VAR lastPromoDay = CALCULATE ( MAX ( Promotions[last_promo_date] ), REMOVEFILTERS ( 'Date' ) )
+VAR today = CALCULATE ( MAX ( DailyPrices[date] ), REMOVEFILTERS ( 'Date' ) )
+RETURN
+    IF (
+        [Promos Running Now] > 0, 0,
+        IF ( NOT ISBLANK ( lastPromoDay ), DATEDIFF ( lastPromoDay, today, DAY ) )
+    )
+
+// Share of product-days on promo. By date and competitor = "promo intensity":
+// which competitor discounts most, and when.
+Share On Promo % =
+DIVIDE ( SUM ( DailyPrices[on_promo] ), COUNTROWS ( DailyPrices ) )
+
+
+// ------------------------------- Insights -------------------------------
+
+Avg Increase % =
+CALCULATE ( AVERAGE ( PriceChanges[change_pct] ), PriceChanges[change_type] = "increase" ) / 100
+
+Avg Drop % =
+CALCULATE ( AVERAGE ( PriceChanges[change_pct] ), PriceChanges[change_type] = "decrease" ) / 100
+
+// Average normal-price change per product over the selected period (works per category / competitor)
+Avg Normal Price Change % (period) =
+AVERAGEX ( VALUES ( Products[product_id] ), [Normal Price Change % (period)] )
+
+// How often prices move: normal-price changes per product in the period
+Price Moves Per Product =
+DIVIDE ( [Normal Price Increases] + [Normal Price Drops], [Products Tracked] )
+
+Out Of Stock % =
+DIVIDE ( CALCULATE ( COUNTROWS ( DailyPrices ), DailyPrices[in_stock] = 0 ), COUNTROWS ( DailyPrices ) )
+
+// Products first seen inside the selected dates (new listings by competitors)
+New Listings =
+VAR d1 = MIN ( 'Date'[Date] )
+VAR d2 = MAX ( 'Date'[Date] )
+RETURN COUNTROWS ( FILTER ( Products, Products[first_seen] >= d1 && Products[first_seen] <= d2 ) ) + 0
+
+
+// ---------------------------- Scraper health ----------------------------
+
+// "partial" = the crawl stopped part-way (prices collected until then were saved)
+Failed Runs =
+CALCULATE ( COUNTROWS ( ScraperRuns ), ScraperRuns[status] IN { "failed", "partial" } ) + 0
+
+Products Seen Last Run =
+VAR lastRun = MAX ( ScraperRuns[started_at] )
+RETURN CALCULATE ( SUM ( ScraperRuns[items_seen] ), ScraperRuns[started_at] = lastRun )
+
+// Products that disappeared from a competitor's site (not seen in the last 3 days)
+Delisted Products =
+VAR today = CALCULATE ( MAX ( Products[last_seen] ), ALL ( Products ) )
+RETURN COUNTROWS ( FILTER ( Products, Products[last_seen] < today - 3 ) ) + 0
+
+Last Run =
+MAX ( ScraperRuns[started_at] )

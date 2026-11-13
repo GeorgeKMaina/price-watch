@@ -1,0 +1,8 @@
+competitor,category,page_type,url,active,notes
+Foodplus,,all,https://foodplus.co.ke/,yes,WHOLE catalogue (~548 categories): the scraper finds every category itself
+Naivas,,all,https://www.naivas.online/,yes,WHOLE catalogue (~231 categories)
+Quickmart,,all,https://www.quickmart.co.ke/,yes,WHOLE catalogue (~70 categories) for the branch set by LOCATION in scrapers/quickmart.py
+Foodplus,Small appliances,category,https://foodplus.co.ke/electronics/small-appliances/kettles.html,no,example: one category only (not needed while the 'all' row is active)
+Foodplus,Small appliances,product,https://foodplus.co.ke/ramtons-rm-226-corded-kettle-1-7l.html,no,example: one product page
+Quickmart,Small appliances,category,https://www.quickmart.co.ke/small-kitchen-home-appliance,no,example: one category only
+Naivas,Small appliances,category,https://www.naivas.online/kitchen-appliances/electric-kettles-air-friers,no,example: one category only

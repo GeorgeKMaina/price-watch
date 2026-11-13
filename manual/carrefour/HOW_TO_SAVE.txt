@@ -1,0 +1,42 @@
+HOW TO SAVE CARREFOUR PAGES FOR PRICE TRACKING
+==============================================
+
+Carrefour's website blocks automated price tools, so its prices come from pages you save
+yourself in your normal browser. It takes about a minute per category. Every daily run imports
+whatever is saved in this folder.
+
+1. Open the page in Chrome or Edge
+   - a category, e.g. https://www.carrefour.ke/mafken/en/c/FKEN1500000 (Beverages)
+   - or a search, e.g. https://www.carrefour.ke/mafken/en/search?keyword=kettle
+   Check the store shown at the top (e.g. "Westlands - Nairobi"). Always use the SAME store,
+   because prices can differ by store.
+
+2. Let all the products load
+   Scroll slowly to the bottom of the page so every product appears.
+   If the page has numbered pages or a "Next" button, save each page separately (step 3).
+
+3. Save it: press Ctrl+S
+   - "Save as type": choose  Webpage, Single File (*.mhtml)   <- best: it records the date and the page address
+     (Webpage, Complete (*.html) also works: put the date at the start of the file name, e.g.
+      "2026-11-14 Beverages.html")
+   - Save into this folder, inside a sub-folder named after YOUR category:
+         manual\carrefour\Beverages\
+         manual\carrefour\Small appliances\
+     The sub-folder name becomes the category in Power BI. Create new sub-folders as needed.
+
+4. Get the file to the daily run
+   - Working with the GitHub repo in the browser: open manual/carrefour/<Category>/ on github.com,
+     click "Add file" -> "Upload files", drag the saved file in, and commit.
+   - Running locally (Anaconda Prompt / the notebook): nothing more to do; the next run imports it.
+
+Good to know
+- How often: once or twice a week per category is enough to see promos and price changes.
+  The more often you save, the more precise the promo dates.
+- Saving the same page twice on the same day is fine, and importing the same file twice adds
+  nothing. You can leave old files in place.
+- To keep old files out of the way, move them into a folder starting with "_" (e.g. _archive).
+  Folders starting with "_" are ignored.
+- Sponsored products ("Ad") from other categories can appear on a page. They're imported with that
+  page's category; config/product_map.csv can re-label them.
+- If a run reports "0 products" for a file, the page probably wasn't fully loaded when it was saved.
+  Open it again, scroll to the bottom, and save again.
