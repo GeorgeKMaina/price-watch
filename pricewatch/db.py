@@ -45,7 +45,13 @@ def connect():
             "DATABASE_URL is not set. Put your Supabase connection string in a .env file in the project "
             "folder (see SUPABASE_SETUP.md), or set it as a GitHub secret for the Actions run."
         )
-    conn = psycopg2.connect(**connection_params(url), connect_timeout=30)
+    # keepalives: notice a dead connection (PC went to sleep, network dropped) within ~2 minutes
+    # instead of waiting forever; timeouts stop any single statement or lock wait from hanging.
+    conn = psycopg2.connect(**connection_params(url), connect_timeout=30,
+                            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=6)
+    with conn.cursor() as cur:   # (Supabase's pooler ignores connect-time options, so set them here)
+        cur.execute("SET statement_timeout = '15min'; SET lock_timeout = '2min'")
+    conn.commit()
     conn.autocommit = False
     return conn
 
@@ -129,13 +135,16 @@ def save_items(conn, run_id: int, competitor: str, items: list[dict], ts: dateti
             competitor, it["sku"], it["name"], it.get("url"), it.get("currency"),
             it.get("site_category"), it.get("category"),
             it.get("my_category"), it.get("product_group"), bool(it.get("key_item")),
-            it["_first"], it["_last"],
+            it["_first"], it["_last"], it.get("retailer_code"), it.get("barcode"),
         ) for it in by_sku.values()]
         ids = psycopg2.extras.execute_values(cur, """
             INSERT INTO products (competitor, sku, name, url, currency, site_category, target_category,
-                                  my_category, product_group, key_item, first_seen, last_seen)
+                                  my_category, product_group, key_item, first_seen, last_seen,
+                                  retailer_code, barcode)
             VALUES %s
             ON CONFLICT (competitor, sku) DO UPDATE SET
+                retailer_code   = COALESCE(EXCLUDED.retailer_code, products.retailer_code),
+                barcode         = COALESCE(EXCLUDED.barcode, products.barcode),
                 name            = EXCLUDED.name,
                 url             = COALESCE(EXCLUDED.url, products.url),
                 currency        = COALESCE(EXCLUDED.currency, products.currency),

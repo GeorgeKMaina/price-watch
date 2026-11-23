@@ -28,8 +28,19 @@ def main(argv=None) -> None:
         cur.execute("SELECT COUNT(*) FROM v_daily_prices")
         n = cur.fetchone()[0]
     conn.commit()
-    conn.close()
     print(f"v_daily_prices refreshed: {n} rows in {time.time() - t:.0f}s")
+    # decision tables: today's prices per item, position vs rivals, the action list (one transaction,
+    # so Power BI never sees them half-built)
+    t = time.time()
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = '15min'")
+        cur.execute((db.ROOT / "sql" / "insights.sql").read_text(encoding="utf-8"))
+        cur.execute("SELECT (SELECT count(*) FROM item_prices_now), (SELECT count(*) FROM price_position), "
+                    "(SELECT count(*) FROM actions)")
+        a, b, c = cur.fetchone()
+    conn.commit()
+    conn.close()
+    print(f"insights refreshed in {time.time() - t:.0f}s: {a} item prices, {b} rival comparisons, {c} actions")
 
 
 if __name__ == "__main__":

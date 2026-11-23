@@ -1,0 +1,22 @@
+{
+  "_help": "Folders that hold the retailers' monthly item/sales files (Excel). Every .xlsx in these folders (and sub-folders) is scanned; each file's retailer is recognised from its column headings. Only item details are used (codes, barcode, name, supplier, category): sales quantities and values are never read into the database. Edit the list any time.",
+  "retailer_files_folders": [
+    "C:\\Users\\George.Maina\\Downloads\\Sec Data",
+    "C:\\Users\\George.Maina\\Downloads\\COnsolidate Wholesale Monthly Data\\Pipeline test\\Quick mart"
+  ],
+
+  "_help_ours": "Items count as OURS when their supplier (as written in ANY retailer's file) contains one of these texts (capitals don't matter). Re-checked on every run, so new SKUs in next month's files are picked up automatically.",
+  "our_suppliers_contain": ["HEALTHY U"],
+
+  "_help_columns": "Which column heading holds what, per retailer file. Change a heading here if a retailer renames a column. code, barcode, name and supplier are what matter; category is a list from broad to narrow; month is the month column (newest month wins when an item appears in several files).",
+  "retailer_file_columns": {
+    "Carrefour": {"code": "Item Code", "barcode": "Item Bar Code", "name": "Item Name", "supplier": "SupplierName",
+                  "brand": "Brand Name", "category": ["Section Name", "Family name", "Sub Family Name"], "month": ["EoM", "EOM"]},
+    "Naivas":    {"code": "ITEMLOOKUPCODE", "barcode": "BARCODE", "name": "DESCRIPTION", "supplier": "SUPPLIERNAME",
+                  "brand": null, "category": ["CATEGORY"], "month": ["EOM"]},
+    "Foodplus":  {"code": "ITEM_CD", "barcode": "Barcode", "name": "Item Desc", "supplier": "VendorName",
+                  "brand": null, "category": ["Department"], "month": ["Month"]},
+    "Quickmart": {"code": "ITEM_CODE", "barcode": "BARCODE", "name": "ITEM_NAME", "supplier": "SUPPLIER",
+                  "brand": null, "category": ["DEPARTMENT", "SUB DEPARTMENT", "MICRO DEPARTMENT"], "month": ["EOM"]}
+  }
+}

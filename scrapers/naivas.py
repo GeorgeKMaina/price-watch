@@ -1,173 +1,170 @@
-"""Naivas (naivas.online), a Laravel Livewire shop.
+"""Naivas (naivas.online).
 
-How prices appear on the site:
-    on promo:   green "KES 7,525"  +  red struck-through "KES 12,495"  +  "Save KES 4,970"
-    no promo:   green price only
-        normal_price = struck-through price if present, else the green price
-        promo_price  = the green price when a struck-through price is present, else None
+Naivas rebuilt its website after 16 Nov 2026. Category pages now show only the first 20
+products and load the rest in the background as you scroll, from the catalogue source the
+website itself uses (app.naivas.online/api/v1, "web" channel). This scraper reads that same
+source - with the owner's explicit approval - 250 products per request, with a pause between
+requests. The plain listing stops at 10,000 and shuffles its order, so the catalogue is read
+department by department (each department listing includes all its sub-categories).
 
-IDs: each product has an internal product_id (e.g. 40740). Category cards carry it in a hidden
-<input name="product_id">, and product pages carry it in the image path /product/40740/, so both
-page types give the same SKU and the price history stays continuous.
+Each product comes with:
+    product_id      Naivas' internal number (also the number used by the old site, so the
+                    price history continues)                              -> sku
+    sku             Naivas item code, e.g. N045994 or 20000988 (= ITEMLOOKUPCODE in Naivas'
+                    sales files)                                          -> retailer_code
+    product_number  barcode                                               -> barcode
+    price / special_price (+ special_price_from / _to)                   -> normal / promo price
+    category (+ ancestors)                                                -> site_category
 
-Category pages show 15 products per page; page N is <category-url>?page=N.
-(The "over 18" pop-up in the HTML is only shown in the browser; it doesn't affect the data.)
-
-Pages come from config/targets.csv (competitor = Naivas):
-    page_type = category  ->  e.g. https://www.naivas.online/kitchen-appliances/electric-kettles-air-friers
-    page_type = product   ->  e.g. https://www.naivas.online/mika-air-frier-5ltr-mafdw2105
+config/targets.csv: use page_type "all" for Naivas (single category / product rows are ignored
+for Naivas now: the full catalogue is only ~40 requests).
 """
 from __future__ import annotations
 
-import html
-import json
-import re
 import time
+from datetime import datetime, timezone
 
-from bs4 import BeautifulSoup
+import requests
 
-from ._utils import crawl_all, get, parse_price
+from ._utils import HEADERS
 
 COMPETITOR = "Naivas"
-BASE = "https://www.naivas.online"
-MAX_PAGES = 80          # safety cap per category (15 products per page)
-PAUSE_SECONDS = 2.0     # be polite between page requests
+SITE = "https://www.naivas.online"
+API = "https://app.naivas.online/api/v1"
+PER_PAGE = 250
+PAUSE_SECONDS = 3.0
+MAX_PAGES = 60             # per department per pass (a department of 15,000 products)
+MAX_PASSES = 4             # re-read a department until all its listed products are collected
 
 
-def _prices(block) -> tuple[float | None, float | None]:
-    if block is None:
-        return None, None
-    current = block.select_one("span.text-naivas-green")
-    old = block.select_one("span.line-through")
-    cur_v = parse_price(current.get_text()) if current else None
-    old_v = parse_price(old.get_text()) if old else None
-    if old_v and cur_v and cur_v < old_v:
-        return old_v, cur_v
-    return cur_v or old_v, None
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({**HEADERS, "Accept": "application/json", "X-Channel": "web"})
+    return s
 
 
-def _card_container(inp):
-    """Walk up from the hidden product_id input to the element holding the whole card."""
-    el = inp
-    for _ in range(12):
-        el = el.parent
-        if el is None:
-            return None
-        if el.select_one(".product-price") and el.select_one("a[title]"):
-            return el
-    return None
-
-
-def discover_categories(home: str = BASE + "/") -> list[tuple[str, str]]:
-    """The whole category tree from the site menu: [(site_category_path, url), ...], lowest level only.
-
-    Menu structure: department (top bar) > category > sub-category. A category without
-    sub-categories is crawled itself.
-    """
-    soup = BeautifulSoup(get(home).text, "html.parser")
-    found: dict[str, str] = {}
-    for masonry in soup.select("ul.masonry"):
-        panel = masonry.find_parent("div", class_="absolute")
-        dept = None
-        if panel is not None:
-            label = panel.find_previous_sibling(["button", "a", "span", "div"])
-            dept = label.get_text(" ", strip=True) if label else None
-            if dept and (len(dept) > 40 or not dept.strip()):
-                dept = None
-        # each category is an <a> directly in the list, wrapping its own list of sub-category links
-        for item in masonry.find_all(["a", "li"], recursive=False):
-            top = item if item.name == "a" else item.find("a", href=True)
-            if not top or not top.get("href"):
-                continue
-            top_url = _abs(top["href"])
-            top_name = next((s.strip() for s in top.strings if s.strip()), None)
-            subs = [a for a in item.select("ul li a[href]") if a is not top]
-            if subs:
-                for a in subs:
-                    path = " > ".join(x for x in (dept, top_name, a.get_text(" ", strip=True)) if x)
-                    found.setdefault(_abs(a["href"]), path)
-            elif top_name:
-                found.setdefault(top_url, " > ".join(x for x in (dept, top_name) if x))
-    return [(path, url) for url, path in found.items()]
-
-
-def _abs(href: str) -> str:
-    href = href.split("?")[0].rstrip("/")
-    return href if href.startswith("http") else BASE + href
-
-
-def scrape_category(url: str, category: str | None, site_category: str | None = None, seen: set | None = None):
-    url = url.split("?")[0].rstrip("/")
-    seen = set() if seen is None else seen   # shared across categories in a full crawl: each product once
-    for page in range(1, MAX_PAGES + 1):
-        soup = BeautifulSoup(get(url if page == 1 else f"{url}?page={page}").text, "html.parser")
-        new = 0
-        for inp in soup.select("input[name=product_id]"):
-            pid = inp.get("value")
-            if not pid or pid in seen:
-                continue
-            card = _card_container(inp)
-            if card is None:
-                continue
-            link = card.select_one("a[title][href]")
-            normal, promo = _prices(card.select_one(".product-price"))
-            text = card.get_text(" ", strip=True).lower()
-            seen.add(pid)
-            new += 1
-            yield {
-                "sku": pid,
-                "name": link["title"],
-                "normal_price": normal,
-                "promo_price": promo,
-                "currency": "KES",
-                "in_stock": not ("out of stock" in text or "unavailable" in text),
-                "url": link["href"],
-                "category": category,
-                "site_category": site_category,
-            }
-        if new == 0:
-            break  # past the last page (Naivas returns an empty listing), or all already seen
-        time.sleep(PAUSE_SECONDS)
-
-
-def scrape_product(url: str, category: str | None):
-    soup = BeautifulSoup(get(url).text, "html.parser")
-    data = {}
-    for sc in soup.select("script[type='application/ld+json']"):
+def _get(s: requests.Session, params: dict) -> dict:
+    last = None
+    for attempt in range(1, 6):
         try:
-            d = json.loads(html.unescape(sc.get_text()))
-        except ValueError:
-            continue
-        if d.get("@type") == "Product":
-            data = d
-            break
-    offer = data.get("offers") or {}
-    details = soup.select_one("div.details")
-    normal, promo = _prices(details)
-    if normal is None:  # fall back to the structured data (current price only)
-        normal = parse_price(offer.get("price"))
-    image = (soup.select_one("meta[property='og:image']") or {}).get("content", "")
-    m = re.search(r"/product/(\d+)/", image)
-    title = soup.select_one("meta[property='og:title']")
-    availability = offer.get("availability", "")
-    yield {
-        "sku": m.group(1) if m else (data.get("sku") or url.rstrip("/").split("/")[-1]),
-        "name": data.get("name") or (title.get("content") if title else None),
-        "normal_price": normal,
-        "promo_price": promo,
-        "currency": offer.get("priceCurrency") or "KES",
-        "in_stock": ("InStock" in availability) if availability else None,
-        "url": url,
+            r = s.get(f"{API}/products", params=params, timeout=60)
+            if r.status_code in (403, 429):
+                raise RuntimeError(f"Naivas refused the request (HTTP {r.status_code})")
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError) as e:
+            last = e
+            time.sleep(PAUSE_SECONDS * attempt * 2)
+    raise last
+
+
+def _when(v):
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00")) if v else None
+    except ValueError:
+        return None
+
+
+def _promo(p: dict) -> float | None:
+    """special_price only counts while its date window is running."""
+    sp = p.get("special_price")
+    if sp in (None, "", 0):
+        return None
+    now = datetime.now(timezone.utc)
+    start, end = _when(p.get("special_price_from")), _when(p.get("special_price_to"))
+    if (start and now < start) or (end and now > end):
+        return None
+    return float(sp)
+
+
+def _category(p: dict) -> str | None:
+    c = p.get("category") or {}
+    names = [a.get("name") for a in (c.get("ancestors") or []) if a.get("name")]
+    if c.get("name"):
+        names.append(c["name"])
+    return " > ".join(names) or None
+
+
+def _in_stock(p: dict):
+    if p.get("is_active") is False:
+        return False
+    if p.get("in_stock") is not None:
+        return bool(p["in_stock"])
+    q = p.get("inventory_source_quantity", p.get("qty"))
+    return None if q is None else float(q) > 0
+
+
+def _row(p: dict, category):
+    return {
+        "sku": str(p.get("product_id") or p.get("id")),
+        "name": p.get("name"),
+        "normal_price": p.get("price"),
+        "promo_price": _promo(p),
+        "currency": "KES",
+        "in_stock": _in_stock(p),
+        "url": f"{SITE}/{p['url_key']}" if p.get("url_key") else None,
         "category": category,
+        "site_category": _category(p),
+        "retailer_code": (str(p["sku"]).strip().upper() if p.get("sku") else None),
+        "barcode": (str(p["product_number"]).strip() if p.get("product_number") else None),
     }
 
 
+def _departments(s: requests.Session) -> list[str]:
+    """Top-level category slugs (their listing includes everything beneath them). Promos last:
+    it's a collection of items that also sit in a real department."""
+    for attempt in range(1, 6):
+        try:
+            r = s.get(f"{API}/categories", params={"per_page": 1000}, timeout=60)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            break
+        except (requests.RequestException, ValueError):
+            if attempt == 5:
+                raise
+            time.sleep(PAUSE_SECONDS * attempt * 2)
+    tops = [c["slug"] for c in data if c.get("url_path") and "/" not in c["url_path"]]
+    time.sleep(PAUSE_SECONDS)
+    return sorted(tops, key=lambda x: x == "promos")
+
+
+def scrape_all(category: str | None = None):
+    """Read department by department. The source returns pages in a shifting order, so each
+    department is re-read (up to MAX_PASSES times) until the number of different products
+    collected matches the total the source reports for it."""
+    s = _session()
+    seen: set = set()
+    shortfall = 0
+    for dept in _departments(s):
+        got: set = set()
+        total = None
+        for _pass in range(MAX_PASSES):
+            page, last_page = 1, 1
+            while page <= min(last_page, MAX_PAGES):
+                j = _get(s, {"category": dept, "per_page": PER_PAGE, "page": page})
+                meta = j.get("meta") or {}
+                last_page = int(meta.get("last_page") or last_page)
+                total = int(meta.get("total") or 0)
+                for p in j.get("data") or []:
+                    pid = p.get("product_id") or p.get("id")
+                    if not pid or p.get("price") in (None, ""):
+                        continue
+                    got.add(pid)
+                    if pid not in seen:
+                        seen.add(pid)
+                        yield _row(p, category)
+                page += 1
+                time.sleep(PAUSE_SECONDS)
+            if total is not None and len(got) >= total:
+                break
+        if total and len(got) < total:
+            shortfall += total - len(got)
+        print(f"    {dept}: {len(got)} of {total} | catalogue so far {len(seen)}", flush=True)
+    if shortfall:
+        print(f"    note: {shortfall} listed products could not be collected after {MAX_PASSES} passes")
+
+
 def scrape(targets):
-    for t in targets:
-        if t["page_type"] == "all":
-            yield from crawl_all(COMPETITOR, discover_categories(), scrape_category, t["category"])
-        elif t["page_type"] == "product":
-            yield from scrape_product(t["url"], t["category"])
-        else:
-            yield from scrape_category(t["url"], t["category"])
-        time.sleep(PAUSE_SECONDS)
+    if not any(t["page_type"] == "all" for t in targets):
+        print("    note: Naivas now only supports page_type 'all' (full catalogue, ~40 requests)")
+    yield from scrape_all(next((t["category"] for t in targets if t["page_type"] == "all"), None))

@@ -121,6 +121,28 @@ Edit in Excel (save as **CSV UTF-8**) or on GitHub (open the file, then click th
 - `key_item = yes`: the items you care about most.
 - Saving the file on GitHub relabels **every product, including history**, within about a minute.
 
+## Your item list (from the retailers' monthly files)
+
+The dashboard's item pages are built from the files retailers share with you, not from website
+names. Each product gets **one uniform name** across retailers, keyed by barcode.
+
+- **Where the files are:** `config/settings.json`, `retailer_files_folders`. Change the folders there.
+  `python -m pricewatch.items` reads them. Only item details are read; sales figures are never saved.
+- **Which items you follow:** `config/watchlist.csv` (supplier, brand or name text, or a barcode).
+  An empty file means you follow every item.
+- **Matching to the websites:** `python -m pricewatch.link`.
+  - Foodplus and Carrefour match by item code.
+  - Naivas matches by item code (ITEMLOOKUPCODE) or barcode.
+  - Quickmart shows no codes online, so it is matched by name and pack size.
+- **Matches that are unsure** are listed on the Power BI page **Matching to check**, and in
+  `data/needs_matching.csv`. To confirm one, add a row to `config/confirmed_matches.csv`:
+  `retailer,retailer_code,web_sku`. Use `web_sku = none` if the item isn't sold online.
+- **Daily run:** `run_quickmart.bat` (PC, 10:00) runs Quickmart, then items, then link, then refresh.
+  By then GitHub's 06:00 run has already collected Foodplus and Naivas.
+
+Naivas: since its new website (Nov 2026), its full catalogue is read department by department
+from the source its own website uses. The owner approved this. It covers about 11,900 products.
+
 ## Adding a competitor
 
 Copy `scrapers/_template.py` to `scrapers/<name>.py`. A scraper yields one dict per product:

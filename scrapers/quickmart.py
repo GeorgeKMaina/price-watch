@@ -35,14 +35,18 @@ BASE = "https://www.quickmart.co.ke"
 
 # The delivery location that decides which branch's prices you see. Change it to the
 # area you compete in; keep it fixed afterwards so prices stay comparable over time.
+#   Quickmart Kiambu (Thindigua, Kiambu Road) = branch 3: the biggest in sales and range.
+#   (Until 17 Nov 2026 this was central Nairobi = branch 16, which doesn't stock e.g. Alpro.
+#   Product ids are per branch, so a new branch starts a new price history.)
 LOCATION = {
     "country": "KE",
-    "state": "Nairobi County",
-    "city": "Nairobi",
-    "lat": "-1.2864",
-    "lng": "36.8172",
-    "address": "Nairobi, Kenya",
+    "state": "Kiambu County",
+    "city": "Kiambu",
+    "lat": "-1.2030",
+    "lng": "36.8350",
+    "address": "Thindigua, Kiambu, Kenya",
 }
+EXPECTED_BRANCH = "3"   # warn if Quickmart starts sending this location to another branch
 
 MAX_PAGES = 60          # safety cap per category (30 products per page)
 PAUSE_SECONDS = 2.0     # between requests
@@ -117,6 +121,16 @@ def _stock(el) -> bool | None:
         return None
 
 
+IMAGE_CODE = re.compile(r"product_images_(\d+)\.")
+
+
+def _item_code(el) -> str | None:
+    """Quickmart's own item code (= ITEM_CODE in its sales files): the website stores each product's
+    picture under it, e.g. .../product_images_400100.png for Brookside Dairy Best Milk 500ml."""
+    m = IMAGE_CODE.search(str(el)) if el is not None else None
+    return m.group(1) if m else None
+
+
 def _card(card, category, branch):
     link = card.select_one("a.products-title")
     sid = card.select_one("input[name=selprod_id]")
@@ -124,6 +138,7 @@ def _card(card, category, branch):
         return None
     normal, promo = _prices(card.select_one(".products-price"))
     return {
+        "retailer_code": _item_code(card),
         "sku": sid["value"],
         "name": link.get("title") or link.get_text(" ", strip=True),
         "normal_price": normal,
@@ -188,6 +203,7 @@ def scrape_product(s, url, category, branch):
         sid = m.group(1) if m else None
     normal, promo = _prices(main.select_one(".products-price"))
     yield {
+        "retailer_code": _item_code(main.select_one("img[src*=product_images_]") or main),
         "sku": sid or url.rstrip("/").split("/")[-1],
         "name": title.get_text(" ", strip=True) if title else None,
         "normal_price": normal,
@@ -203,6 +219,8 @@ def scrape(targets):
     s = _session()
     branch = _set_location(s)
     print(f"    Quickmart branch for {LOCATION['address']}: {branch}")
+    if EXPECTED_BRANCH and branch != EXPECTED_BRANCH:
+        print(f"    WARNING: expected branch {EXPECTED_BRANCH} (Kiambu), got {branch}: prices may not be comparable")
     for t in targets:
         if t["page_type"] == "all":
             yield from crawl_all(

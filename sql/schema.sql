@@ -54,6 +54,139 @@ CREATE TABLE IF NOT EXISTS report_settings (
 );
 INSERT INTO report_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
+-- ----------------------------------------------------------------------------------------
+-- ITEM MASTER (from the retailers' monthly files, see pricewatch/items.py) and LINKS from
+-- website products to those items (see pricewatch/link.py).
+-- ----------------------------------------------------------------------------------------
+ALTER TABLE products ADD COLUMN IF NOT EXISTS retailer_code TEXT;   -- retailer's own item code when the website shows it
+ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT;         -- barcode when the website gives it (Naivas does)
+
+CREATE TABLE IF NOT EXISTS items (
+    item_key            TEXT PRIMARY KEY,      -- 'B' + barcode, or retailer prefix + code when there's no barcode
+    barcode             TEXT,
+    uniform_name        TEXT NOT NULL,
+    brand               TEXT,
+    supplier            TEXT,
+    all_suppliers       TEXT,
+    category_1          TEXT,
+    category_2          TEXT,
+    category_3          TEXT,
+    retailers_in_files  TEXT,
+    watched             BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+ALTER TABLE items ADD COLUMN IF NOT EXISTS supplier_group TEXT;     -- one spelling per supplier
+ALTER TABLE items ADD COLUMN IF NOT EXISTS ours BOOLEAN NOT NULL DEFAULT FALSE;  -- settings.json our_suppliers_contain
+ALTER TABLE items ADD COLUMN IF NOT EXISTS pack_size NUMERIC(12,2);  -- grams, millilitres or pieces
+ALTER TABLE items ADD COLUMN IF NOT EXISTS pack_unit TEXT;           -- g | ml | pc
+
+-- ---- Decision tables, rebuilt after every crawl by pricewatch.refresh (sql/insights.sql) ----
+-- Today's price of each item at each retailer (from the linked website product).
+CREATE TABLE IF NOT EXISTS item_prices_now (
+    item_key       TEXT NOT NULL,
+    retailer       TEXT NOT NULL,
+    product_id     BIGINT,
+    web_name       TEXT,
+    url            TEXT,
+    normal_price   NUMERIC(12,2),
+    promo_price    NUMERIC(12,2),
+    price_paid     NUMERIC(12,2),
+    discount_pct   NUMERIC(6,1),
+    in_stock       BOOLEAN,
+    normal_7d_ago  NUMERIC(12,2),
+    change_7d_pct  NUMERIC(6,1),
+    per_unit       NUMERIC(12,1),       -- price paid per kg / litre / piece
+    unit_label     TEXT,
+    compare_group  TEXT,                -- the narrowest category: what "rivals" are compared within
+    ours           BOOLEAN,
+    in_our_groups  BOOLEAN,             -- a rival listing in a category where we're listed at that retailer
+    PRIMARY KEY (item_key, retailer)
+);
+-- Each of our items vs its cheapest rival (per kg / litre / piece, similar pack size, same retailer).
+CREATE TABLE IF NOT EXISTS price_position (
+    item_key        TEXT NOT NULL,
+    retailer        TEXT NOT NULL,
+    compare_group   TEXT,
+    our_price       NUMERIC(12,2),
+    our_per_unit    NUMERIC(12,1),
+    unit_label      TEXT,
+    rival_item_key  TEXT,
+    rival_name      TEXT,
+    rival_supplier  TEXT,
+    rival_price     NUMERIC(12,2),
+    rival_per_unit  NUMERIC(12,1),
+    gap_pct         NUMERIC(8,1),       -- + = we're dearer per unit than the cheapest rival
+    rivals          INTEGER,            -- rivals compared
+    cheaper_rivals  INTEGER,            -- how many of them are cheaper than us
+    PRIMARY KEY (item_key, retailer)
+);
+-- The "needs action" list, ranked.
+CREATE TABLE IF NOT EXISTS actions (
+    action_id      SERIAL PRIMARY KEY,
+    priority       INTEGER NOT NULL,    -- 1 act now, 2 look this week, 3 good to know
+    action_type    TEXT NOT NULL,
+    retailer       TEXT,
+    category       TEXT,
+    item_key       TEXT,
+    item_name      TEXT,
+    supplier       TEXT,
+    headline       TEXT NOT NULL,
+    detail         TEXT,
+    metric_pct     NUMERIC(8,1),
+    since          DATE
+);
+ALTER TABLE price_position ADD COLUMN IF NOT EXISTS rival_median_per_unit NUMERIC(12,1);  -- typical similar rival
+ALTER TABLE price_position ADD COLUMN IF NOT EXISTS gap_vs_median_pct NUMERIC(8,1);       -- + = dearer than typical
+ALTER TABLE item_prices_now ENABLE ROW LEVEL SECURITY;
+ALTER TABLE price_position ENABLE ROW LEVEL SECURITY;
+ALTER TABLE actions ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS retailer_items (
+    retailer       TEXT NOT NULL,
+    retailer_code  TEXT NOT NULL,
+    item_key       TEXT NOT NULL,
+    barcode        TEXT,
+    retailer_name  TEXT,
+    supplier       TEXT,
+    brand          TEXT,
+    category_1     TEXT,
+    category_2     TEXT,
+    category_3     TEXT,
+    last_month     TEXT,
+    PRIMARY KEY (retailer, retailer_code)
+);
+
+CREATE TABLE IF NOT EXISTS product_links (
+    product_id     BIGINT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+    retailer       TEXT NOT NULL,
+    retailer_code  TEXT NOT NULL,
+    item_key       TEXT NOT NULL,
+    method         TEXT NOT NULL,              -- code | name | confirmed
+    score          NUMERIC(5,3),
+    linked_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_links_item ON product_links (item_key);
+
+CREATE TABLE IF NOT EXISTS match_review (
+    retailer       TEXT NOT NULL,
+    retailer_code  TEXT NOT NULL,
+    item_key       TEXT NOT NULL,
+    retailer_name  TEXT,
+    rank           INTEGER NOT NULL,
+    product_id     BIGINT,
+    web_sku        TEXT,
+    web_name       TEXT,
+    web_url        TEXT,
+    score          NUMERIC(5,3),
+    PRIMARY KEY (retailer, retailer_code, rank)
+);
+
+ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE retailer_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE match_review ENABLE ROW LEVEL SECURITY;
+
 -- Supabase: tables are private (row level security on, no policies). Only the v_* views below are
 -- readable with the read-only key, so Power BI can never change or see anything else.
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;
@@ -63,7 +196,8 @@ ALTER TABLE report_settings ENABLE ROW LEVEL SECURITY;
 
 
 -- ================================ VIEWS FOR POWER BI ================================
-DROP VIEW IF EXISTS v_products, v_price_changes, v_promotions, v_scraper_runs, v_price_periods CASCADE;
+DROP VIEW IF EXISTS v_products, v_price_changes, v_promotions, v_scraper_runs, v_price_periods,
+                    v_items, v_match_review, v_item_prices, v_position, v_actions CASCADE;
 -- (v_daily_prices is a stored table built from v_daily_prices_live; it is never dropped here,
 --  so Power BI keeps its data while the crawlers run. Older versions had it as a plain view.)
 DO $$
@@ -94,8 +228,35 @@ SELECT
     (p.first_seen AT TIME ZONE s.timezone)::date             AS first_seen,
     (p.last_seen  AT TIME ZONE s.timezone)::date             AS last_seen,
     ((p.last_seen AT TIME ZONE s.timezone)::date - (p.first_seen AT TIME ZONE s.timezone)::date + 1) AS days_tracked,
-    concat_ws(' | ', p.name, p.competitor, p.site_category, p.my_category, p.sku, p.product_group) AS search_text
-FROM products p CROSS JOIN report_settings s;
+    concat_ws(' | ', p.name, p.competitor, p.site_category, p.my_category, p.sku, p.product_group) AS search_text,
+    l.item_key,                                              -- the item-master product this listing is (NULL = not linked)
+    l.method                                                 AS link_method,
+    COALESCE(l.retailer_code, p.retailer_code)               AS retailer_code
+FROM products p CROSS JOIN report_settings s
+LEFT JOIN product_links l ON l.product_id = p.id;
+
+-- The item master: one row per product (barcode), uniform name, supplier, category.
+-- "followed" = in config/watchlist.csv (or every item when the watchlist is empty).
+CREATE VIEW v_items AS
+SELECT i.item_key, i.barcode, i.uniform_name, i.brand, i.supplier, i.all_suppliers,
+       COALESCE(i.category_1, 'Uncategorised') AS category_1, i.category_2, i.category_3,
+       i.retailers_in_files,
+       CASE WHEN i.watched THEN 'Yes' ELSE 'No' END AS followed,
+       COALESCE(l.retailers_linked, 0) AS retailers_linked,
+       COALESCE(i.supplier_group, 'Unknown') AS supplier_group,
+       CASE WHEN i.ours THEN 'Ours' ELSE 'Rival' END AS ours,
+       i.pack_size, i.pack_unit,
+       COALESCE(i.category_3, i.category_2, i.category_1, 'Uncategorised') AS compare_group
+FROM items i
+LEFT JOIN (SELECT item_key, count(DISTINCT retailer) AS retailers_linked
+           FROM product_links GROUP BY item_key) l ON l.item_key = i.item_key;
+
+-- Items listed in a retailer's file that aren't linked to a website product yet, with the best
+-- website candidates (Quickmart has no codes online, so it's matched by name + pack size).
+CREATE VIEW v_match_review AS
+SELECT r.retailer, r.retailer_code, r.item_key, i.uniform_name, r.retailer_name, r.rank,
+       r.web_sku, r.web_name, r.web_url, r.score
+FROM match_review r JOIN items i ON i.item_key = r.item_key;
 
 -- Day-by-day prices for the last report_settings.daily_days days: for each day a product was
 -- listed (between first and last seen), the latest price known by the end of that day.
@@ -268,16 +429,27 @@ CREATE VIEW v_scraper_runs AS
 SELECT competitor, started_at, finished_at, status, items_seen, items_changed, error
 FROM runs;
 
+CREATE VIEW v_item_prices AS
+SELECT n.*, CASE WHEN n.ours THEN 'Ours' WHEN n.in_our_groups THEN 'Rival in our categories' ELSE 'Other' END AS scope
+FROM item_prices_now n;
+CREATE VIEW v_position AS SELECT * FROM price_position;
+CREATE VIEW v_actions AS
+SELECT a.*, CASE a.priority WHEN 1 THEN '1 Act now' WHEN 2 THEN '2 This week' ELSE '3 Good to know' END AS priority_label
+FROM actions a;
+
 -- Read-only access for Power BI through Supabase's API (the "anon" key): reporting views only.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
         -- Supabase grants its API roles access to new tables by default: take that away from the raw
         -- tables, so the public key can read the reporting views and nothing else.
-        REVOKE ALL ON products, prices, runs, report_settings, v_daily_prices_live FROM anon;
-        GRANT SELECT ON v_products, v_daily_prices, v_price_periods, v_price_changes, v_promotions, v_scraper_runs TO anon;
+        REVOKE ALL ON products, prices, runs, report_settings, v_daily_prices_live,
+                      items, retailer_items, product_links, match_review, item_prices_now, price_position, actions FROM anon;
+        GRANT SELECT ON v_products, v_daily_prices, v_price_periods, v_price_changes, v_promotions, v_scraper_runs,
+                        v_items, v_match_review, v_item_prices, v_position, v_actions TO anon;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-        REVOKE ALL ON products, prices, runs, report_settings, v_daily_prices_live FROM authenticated;
+        REVOKE ALL ON products, prices, runs, report_settings, v_daily_prices_live,
+                      items, retailer_items, product_links, match_review, item_prices_now, price_position, actions FROM authenticated;
     END IF;
 END $$;

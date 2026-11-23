@@ -65,6 +65,8 @@ def normalize(raw: dict) -> dict:
         "site_category": raw.get("site_category") or None, # the competitor's own category path
         "in_stock": None if in_stock is None else bool(in_stock),
         "scraped_at": raw.get("scraped_at"),               # only set by importers of hand-saved pages
+        "retailer_code": raw.get("retailer_code") or None, # retailer's own item code, when the site shows it
+        "barcode": raw.get("barcode") or None,
     }
 
 
@@ -84,7 +86,31 @@ def call_scrape(module, competitor: str):
     yield from module.scrape()
 
 
-def run_one(conn, name: str, module, rules) -> bool:
+def _alive(conn) -> bool:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _fresh(conn):
+    """A long crawl leaves the database connection idle for 30+ minutes, and Supabase may close it.
+    Check it before saving; reconnect if it was dropped, so the crawl's results are never lost."""
+    if _alive(conn):
+        return conn
+    print("    database connection was closed while crawling: reconnecting before saving", flush=True)
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return db.connect()
+
+
+def run_one(conn, name: str, module, rules):
+    """Returns (ok, conn): conn may be a new connection if the old one was dropped."""
     competitor = getattr(module, "COMPETITOR", name)
     run_id = db.start_run(conn, competitor)
     ts = db.now_utc()
@@ -107,6 +133,7 @@ def run_one(conn, name: str, module, rules) -> bool:
         error = f"{type(e).__name__}: {e}"
         traceback.print_exc()
 
+    conn = _fresh(conn)
     try:
         if not items and not allow_empty and error is None:
             error = "RuntimeError: scraper returned no valid items (site layout changed or blocked?)"
@@ -114,7 +141,11 @@ def run_one(conn, name: str, module, rules) -> bool:
         status = "ok" if error is None else ("partial" if items else "failed")
         db.finish_run(conn, run_id, status, len({i["sku"] for i in items}), written, error[:2000] if error else None)
     except Exception as e:  # noqa: BLE001
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        conn = _fresh(conn)
         status, error = "failed", f"{type(e).__name__} while saving: {e}"
         traceback.print_exc()
         db.finish_run(conn, run_id, status, 0, 0, error[:2000])
@@ -128,7 +159,7 @@ def run_one(conn, name: str, module, rules) -> bool:
         print(f"  ok   {msg}")
     else:
         print(f"  {status.upper()} {msg} | {error}")
-    return status == "ok"
+    return status == "ok", conn
 
 
 def main(argv=None) -> int:
@@ -139,6 +170,16 @@ def main(argv=None) -> int:
     if args.max_categories:
         os.environ["PRICEWATCH_MAX_CATEGORIES"] = str(args.max_categories)
 
+    # Watchdog: a run that is still going after 3 hours is stuck (e.g. the PC slept mid-run).
+    # End it so the next scheduled run isn't blocked. Prices saved earlier stay saved.
+    import threading
+    def _give_up():
+        print("Watchdog: run exceeded 3 hours, stopping.", flush=True)
+        os._exit(2)
+    timer = threading.Timer(3 * 3600, _give_up)
+    timer.daemon = True
+    timer.start()
+
     conn = db.connect()
     db.apply_schema(conn)          # creates tables on first use, refreshes views
     rules = config.load_map()
@@ -147,7 +188,10 @@ def main(argv=None) -> int:
         print("No scrapers found in scrapers/.")
         return 1
     print(f"Running {len(found)} scraper(s)")
-    results = [run_one(conn, name, module, rules) for name, module in found]
+    results = []
+    for name, module in found:
+        ok, conn = run_one(conn, name, module, rules)
+        results.append(ok)
     conn.close()
     failed = results.count(False)
     print(f"Done: {len(results) - failed} ok, {failed} failed or partial")
